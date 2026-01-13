@@ -1,0 +1,17 @@
+video_path: "data/videos/match.mp4"
+output_path: "runs/out_baseline_coco_bytetrack.mp4"
+
+# Detector baseline (COCO)
+weights: "yolov8n.pt"
+
+# Umbrales
+conf: 0.30
+iou: 0.50
+ball_conf: 0.12
+
+# Iteración rápida
+max_frames: 600   # pon -1 para todo el vídeo
+
+# COCO IDs:
+coco_person_id: 0
+coco_sports_ball_id: 32

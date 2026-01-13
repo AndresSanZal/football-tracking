@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# YOLO / runs
+runs/
+*.pt
+
+# Data pesada
+data/videos/
+data/datasets/
+
+# OS / IDE
+.vscode/
+.DS_Store
