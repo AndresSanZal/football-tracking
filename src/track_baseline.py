@@ -79,6 +79,7 @@ def main():
             persons = persons.with_nms(threshold=iou, class_agnostic=True)
 
             # Track
+            
             persons = tracker.update_with_detections(persons)
 
             labels = [f"#{tid}" for tid in persons.tracker_id]

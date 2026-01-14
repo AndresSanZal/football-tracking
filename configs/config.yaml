@@ -2,7 +2,7 @@ video_path: "data/videos/match.mp4"
 output_path: "runs/out_baseline_coco_bytetrack.mp4"
 
 # Detector baseline (COCO)
-weights: "yolov8n.pt"
+weights: "models/yolo_4classes_best.pt"
 
 # Umbrales
 conf: 0.30
