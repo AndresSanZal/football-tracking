@@ -121,13 +121,13 @@ def main():
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    assert Path(video_path).exists(), f"No existe el vídeo: {video_path}"
-    assert Path(weights_path).exists(), f"No existen los pesos: {weights_path}"
+    assert Path(video_path).exists(), f"Video does not exist: {video_path}"
+    assert Path(weights_path).exists(), f"Weights do not exist: {weights_path}"
 
     device = choose_device(args.device)
-    print(f"✅ Device: {device}")
+    print(f"Device {device}")
 
-    # 1) Detectar y recortar jugadores (1 fps aprox)
+    # 1) Detect y crop players
     yolo = YOLO(weights_path)
     crops = crop_players_from_video(
         video_path=video_path,
@@ -142,10 +142,10 @@ def main():
     if len(crops) < 50:
         raise RuntimeError(
             f"Demasiados pocos crops ({len(crops)}). "
-            f"Prueba: bajar stride, bajar conf, o subir max_crops."
+            
         )
 
-    print(f"✅ Crops recogidos: {len(crops)}")
+    print(f"Crops recogidos {len(crops)}")
 
     # 2) SigLIP embeddings (N, 768)
     embeds = extract_siglip_embeddings(
@@ -154,12 +154,12 @@ def main():
         device=device,
         batch_size=args.batch,
     )
-    print(f"✅ Embeddings shape: {embeds.shape}")
+    print(f" Embeddings shape: {embeds.shape}")
 
     # 3) UMAP (N, 3)
     reducer = umap.UMAP(n_components=3, random_state=42)
     proj = reducer.fit_transform(embeds)
-    print(f"✅ Projections shape: {proj.shape}")
+    print(f" Projections shape {proj.shape}")
 
     # 4) KMeans (2 clusters = 2 equipos)
     kmeans = KMeans(n_clusters=2, n_init="auto", random_state=42)
@@ -167,7 +167,7 @@ def main():
 
     # Info rápida
     unique, counts = np.unique(clusters, return_counts=True)
-    print("✅ Cluster counts:", dict(zip(unique.tolist(), counts.tolist())))
+    print("Cluster counts", dict(zip(unique.tolist(), counts.tolist())))
 
     # 5) Guardar todo lo necesario para predecir luego
     artifact = {
