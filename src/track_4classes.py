@@ -13,18 +13,18 @@ import supervision as sv
 # 2: player
 # 3: referee
 BALL_ID = 0
-TRACK_IDS = {1, 2, 3}  # personas a trackear (GK, player, referee). Si no quieres árbitros: {1,2}
+TRACK_IDS = {1, 2, 3}  
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", type=str, required=True, help="Path al vídeo de entrada")
-    parser.add_argument("--weights", type=str, default="models/yolo_4classes_best.pt", help="Path al .pt")
-    parser.add_argument("--output", type=str, default="runs/out_4classes_bytetrack.mp4", help="Vídeo de salida")
+    parser.add_argument("--source", type=str, required=True)
+    parser.add_argument("--weights", type=str, default="models/yolo_4classes_best.pt")
+    parser.add_argument("--output", type=str, default="runs/out_4classes_bytetrack.mp4")
     parser.add_argument("--imgsz", type=int, default=1280)
-    parser.add_argument("--conf", type=float, default=0.30, help="Conf general YOLO (ajustable)")
+    parser.add_argument("--conf", type=float, default=0.30)
     parser.add_argument("--iou", type=float, default=0.7)
-    parser.add_argument("--max_frames", type=int, default=-1, help="Para pruebas rápidas (p.ej. 600). -1 = todo")
+    parser.add_argument("--max_frames", type=int, default=-1)
     args = parser.parse_args()
 
     
@@ -47,9 +47,9 @@ def main():
 
     # Tracker
     tracker = sv.ByteTrack(
-        track_activation_threshold=0.30,   # umbral para activar track (si lo subes, crea menos tracks nuevos)
-        lost_track_buffer=90,              # frames que aguanta “perdido” antes de matar el track (30=1s a 30fps)
-        minimum_matching_threshold=0.70,   # exige mejor match IoU para asignar (evita swaps)
+        track_activation_threshold=0.30,  
+        lost_track_buffer=90,             
+        minimum_matching_threshold=0.70,   
         frame_rate=video_info.fps 
         )
     tracker.reset()
@@ -57,7 +57,7 @@ def main():
 
     # Video IO
     
-    # output video writer via supervision
+    
     with sv.VideoSink(str(out_path), video_info=video_info) as sink:
         frame_generator = sv.get_video_frames_generator(str(source_path))
 
@@ -65,7 +65,7 @@ def main():
             if args.max_frames > 0 and i >= args.max_frames:
                 break
 
-            # Inference
+            
             results = model.predict(
                 source=frame,
                 imgsz=args.imgsz,
@@ -86,24 +86,23 @@ def main():
             detections = detections[keep_ball | keep_people]
 
 
-            # --- Ball (no tracking) ---
+            
             ball_det = detections[detections.class_id == BALL_ID]
             if len(ball_det) > 0:
-                # Opcional: quedarse con la pelota "mejor" por confianza
+               
                 best_idx = int(np.argmax(ball_det.confidence))
                 ball_det = ball_det[[best_idx]]
 
-                # Un poco de padding ayuda visualmente
+                
                 ball_det.xyxy = sv.pad_boxes(ball_det.xyxy, px=10)
 
-            # --- People (tracking) ---
+           
             people_det = detections[np.isin(detections.class_id, list(TRACK_IDS))]
 
-            # NMS para estabilizar (reduce duplicados => menos IDs)
             if len(people_det) > 0:
                 people_det = people_det.with_nms(threshold=0.4, class_agnostic=True)
 
-            # Track update
+           
             if len(people_det) > 0:
                 people_det.xyxy = sv.pad_boxes(people_det.xyxy, px=8)  # prueba 6–12
 
@@ -131,7 +130,7 @@ def main():
     
 
 
-    print(f"✅ Vídeo guardado en: {out_path}")
+    print(f"Vídeo guardado en {out_path}")
 
 
 if __name__ == "__main__":
