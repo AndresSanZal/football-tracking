@@ -61,14 +61,14 @@ def crop_players_from_video(
 
     crops: list[np.ndarray] = []
     for frame in tqdm(frame_gen, desc="Collecting player crops"):
-        # YOLO inference sobre el frame
+       
         res = model.predict(source=frame, conf=conf, iou=iou, verbose=False)[0]
         det = sv.Detections.from_ultralytics(res)
 
-        # Nos quedamos con players
+        
         det = det[det.class_id == PLAYER_CLASS_ID]
 
-        # NMS para quitar duplicados
+       
         if len(det) > 0:
             det = det.with_nms(threshold=nms_th, class_agnostic=True)
 
@@ -127,7 +127,7 @@ def main():
     device = choose_device(args.device)
     print(f"Device {device}")
 
-    # 1) Detect y crop players
+    # 1) Detect an d crop players
     yolo = YOLO(weights_path)
     crops = crop_players_from_video(
         video_path=video_path,
@@ -169,7 +169,7 @@ def main():
     unique, counts = np.unique(clusters, return_counts=True)
     print("Cluster counts", dict(zip(unique.tolist(), counts.tolist())))
 
-    # 5) Guardar todo lo necesario para predecir luego
+    # 5) Save everything to predict afterwards
     artifact = {
         "siglip_name": args.siglip,
         "reducer": reducer,
@@ -177,9 +177,7 @@ def main():
         "note": "Team classifier: SigLIP(768) -> UMAP(3) -> KMeans(2)",
     }
     joblib.dump(artifact, out_path)
-    print(f"💾 Guardado en: {out_path}")
-
-    print("\nSiguiente paso (fase online): cargar este joblib y hacer predict(crops) por frame.")
+    print(f"Guardado en {out_path}")
 
 
 if __name__ == "__main__":
