@@ -93,7 +93,7 @@ def main():
 
             sink.write_frame(annotated)
 
-    print(f"\n✅ Exportado: {output_path}")
+    print(f"\n Exportado {output_path}")
 
 
 if __name__ == "__main__":
