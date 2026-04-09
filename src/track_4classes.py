@@ -18,7 +18,7 @@ MINIMAP_SCALE = 0.05
 # Positive x = shift right on minimap, positive y = shift down.
 # Example: if dots appear ~150 cm too far right, set (-150, 0).
 FIELD_OFFSET = (-1000, -500)
-POSITION_ALPHA = 0.15  # EMA weight for new position (lower = smoother dots)
+POSITION_ALPHA = 0.07  # EMA weight for new position (lower = smoother dots)
 
 calibrator = FieldCalibrator("models/best_pitch.pt")
 
