@@ -10,11 +10,28 @@ from sports.configs.soccer import SoccerPitchConfiguration
 CONFIG = SoccerPitchConfiguration()
 _FIELD_VERTICES = np.array(CONFIG.vertices, dtype=np.float32)
 
+# If a new H moves test points more than this (cm) vs the previous H, reject it.
+# 2000 cm = 20 m — generous enough for real camera movement, but catches garbage Hs.
+MAX_DRIFT_CM = 2000
+
+
+def _homography_drift(H_new: np.ndarray, H_prev: np.ndarray, frame_shape: tuple) -> float:
+    """Max field-space drift (cm) when projecting mid-frame points through H_new vs H_prev."""
+    h, w = frame_shape[:2]
+    # Sample points spread across the frame where players typically appear
+    pts = np.array([
+        [w // 4, h // 2], [w // 2, h // 2], [3 * w // 4, h // 2],
+        [w // 4, 2 * h // 3], [3 * w // 4, 2 * h // 3],
+    ], dtype=np.float32).reshape(-1, 1, 2)
+    p_new  = cv2.perspectiveTransform(pts, H_new).reshape(-1, 2)
+    p_prev = cv2.perspectiveTransform(pts, H_prev).reshape(-1, 2)
+    return float(np.linalg.norm(p_new - p_prev, axis=1).max())
+
 
 class FieldCalibrator:
-    def __init__(self, model_path: str, alpha: float = 0.5):
+    def __init__(self, model_path: str, max_drift: float = MAX_DRIFT_CM):
         self.model = YOLO(model_path)
-        self.alpha = alpha
+        self.max_drift = max_drift
         self.H_prev = None
 
     def get_homography(self, frame: np.ndarray):
@@ -49,9 +66,13 @@ class FieldCalibrator:
         if H is None or (mask is not None and mask.ravel().sum() < 5):
             return self.H_prev
 
-        # Temporal smoothing — critical for dynamic/zooming camera
+        # Validate: reject H if it differs too much from the previous one.
+        # This prevents a single bad frame from corrupting H_prev and causing
+        # the "goes crazy then recovers" pattern.
         if self.H_prev is not None:
-            H = self.alpha * H + (1 - self.alpha) * self.H_prev
+            drift = _homography_drift(H, self.H_prev, frame.shape)
+            if drift > self.max_drift:
+                return self.H_prev  # silently discard garbage H
 
         self.H_prev = H
         return H
