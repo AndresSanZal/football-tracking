@@ -20,8 +20,10 @@ MINIMAP_SCALE = 0.05
 FIELD_OFFSET = (-500, -500)
 POSITION_ALPHA = 0.07  # EMA weight for new position (lower = smoother dots)
 
-BALL_TRAIL_LEN = 60    # frames to keep in trail (~2 s at 30 fps)
+BALL_TRAIL_LEN = 60      # frames to keep in trail (~2 s at 30 fps)
 BALL_COLOR = (255, 255, 255)  # BGR white — dot at current position
+BALL_ALPHA = 0.2         # EMA weight for ball position (lower = smoother)
+BALL_MAX_JUMP_CM = 3000  # reject ball positions that jump more than this between frames
 
 calibrator = FieldCalibrator("models/best_pitch.pt")
 
@@ -78,6 +80,30 @@ def _smooth_field_positions(
             result[i] = alpha * field_pos[i] + (1 - alpha) * smooth_dict[tid]
         smooth_dict[tid] = result[i]
     return result
+
+
+def _update_ball_trail(
+    raw_pos: np.ndarray,
+    trail: deque,
+    smooth_state: list,   # single-element list so it's mutable: [prev_smoothed or None]
+) -> None:
+    """Validate, smooth and append a new ball field position to the trail."""
+    prev = smooth_state[0]
+
+    # Reject positions that teleport (bad homography or false detection)
+    if prev is not None:
+        jump = float(np.linalg.norm(raw_pos - prev))
+        if jump > BALL_MAX_JUMP_CM:
+            return  # discard — don't add to trail, don't update smooth state
+
+    # EMA smoothing
+    if prev is None:
+        smoothed = raw_pos.copy()
+    else:
+        smoothed = BALL_ALPHA * raw_pos + (1 - BALL_ALPHA) * prev
+
+    smooth_state[0] = smoothed
+    trail.append(smoothed.copy())
 
 
 def _draw_ball_trail(pitch: np.ndarray, trail: deque, scale: float, padding: int = 50) -> np.ndarray:
@@ -196,6 +222,7 @@ def main():
     field_pos_smooth: dict = {}  # tracker_id -> smoothed field position (np.ndarray)
     _diag_printed = False  # print field positions once to help calibrate FIELD_OFFSET
     ball_trail: deque = deque(maxlen=BALL_TRAIL_LEN)  # field positions of the ball
+    ball_smooth_state: list = [None]  # [prev_smoothed_pos or None]
 
     with sv.VideoSink(str(out_path), video_info=video_info) as sink:
         frame_generator = sv.get_video_frames_generator(str(source_path))
@@ -273,7 +300,7 @@ def main():
                         ball_center = ball_det.get_anchors_coordinates(sv.Position.CENTER)
                         ball_field = calibrator.project(ball_center, H)
                         ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
-                        ball_trail.append(ball_field[0])
+                        _update_ball_trail(ball_field[0], ball_trail, ball_smooth_state)
                     minimap = draw_pitch(CONFIG, scale=MINIMAP_SCALE)
                     if len(field_pos) > 0:
                         minimap = draw_points_on_pitch(
