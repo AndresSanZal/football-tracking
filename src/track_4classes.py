@@ -22,8 +22,7 @@ POSITION_ALPHA = 0.07  # EMA weight for new position (lower = smoother dots)
 
 BALL_TRAIL_LEN = 60      # frames to keep in trail (~2 s at 30 fps)
 BALL_COLOR = (255, 255, 255)  # BGR white — dot at current position
-BALL_ALPHA = 0.2         # EMA weight for ball position (lower = smoother)
-BALL_MAX_JUMP_CM = 3000  # reject ball positions that jump more than this between frames
+BALL_MAX_JUMP_CM = 3000  # positions farther than this from last valid are treated as no-detection
 
 calibrator = FieldCalibrator("models/best_pitch.pt")
 
@@ -83,37 +82,41 @@ def _smooth_field_positions(
 
 
 def _update_ball_trail(
-    raw_pos: np.ndarray,
-    trail: deque,
-    smooth_state: list,   # single-element list so it's mutable: [prev_smoothed or None]
+    raw_pos: np.ndarray,          # (2,) field position, or None if no detection this frame
+    trail: deque,                 # deque of np.ndarray(2,) or np.ndarray(0,) for gaps
+    last_valid_state: list,       # [last_valid_pos or None] — mutable single-element
 ) -> None:
-    """Validate, smooth and append a new ball field position to the trail."""
-    prev = smooth_state[0]
+    """Add ball position to trail, replacing outliers/missing frames with empty arrays (gaps).
+    Gaps prevent _draw_ball_trail from connecting discontinuous detections with long lines."""
+    if raw_pos is None:
+        trail.append(np.empty(0))
+        return
 
-    # Reject positions that teleport (bad homography or false detection)
+    prev = last_valid_state[0]
     if prev is not None:
         jump = float(np.linalg.norm(raw_pos - prev))
         if jump > BALL_MAX_JUMP_CM:
-            return  # discard — don't add to trail, don't update smooth state
+            # Outlier — treat as a gap, keep last_valid_state unchanged
+            trail.append(np.empty(0))
+            return
 
-    # EMA smoothing
-    if prev is None:
-        smoothed = raw_pos.copy()
-    else:
-        smoothed = BALL_ALPHA * raw_pos + (1 - BALL_ALPHA) * prev
-
-    smooth_state[0] = smoothed
-    trail.append(smoothed.copy())
+    last_valid_state[0] = raw_pos
+    trail.append(raw_pos.copy())
 
 
 def _draw_ball_trail(pitch: np.ndarray, trail: deque, scale: float, padding: int = 50) -> np.ndarray:
-    """Draw ball trail on pitch: fading line + bright dot at current position."""
+    """Draw ball trail on pitch: fading line + bright dot at current position.
+    Empty arrays in the trail act as gaps — no line is drawn across them."""
     pts = list(trail)
-    if len(pts) < 1:
+    n = len(pts)
+    if n < 1:
         return pitch
 
-    for k in range(1, len(pts)):
-        alpha = k / len(pts)  # 0 = oldest (transparent), 1 = newest (bright)
+    for k in range(1, n):
+        # Skip segment if either endpoint is a gap (empty array)
+        if pts[k - 1].shape[0] == 0 or pts[k].shape[0] == 0:
+            continue
+        alpha = k / n  # 0 = oldest (transparent), 1 = newest (bright)
         p1 = (int(pts[k-1][0] * scale) + padding, int(pts[k-1][1] * scale) + padding)
         p2 = (int(pts[k][0]   * scale) + padding, int(pts[k][1]   * scale) + padding)
         color = tuple(int(c * alpha) for c in BALL_COLOR)
@@ -301,6 +304,8 @@ def main():
                         ball_field = calibrator.project(ball_center, H)
                         ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
                         _update_ball_trail(ball_field[0], ball_trail, ball_smooth_state)
+                    else:
+                        _update_ball_trail(None, ball_trail, ball_smooth_state)
                     minimap = draw_pitch(CONFIG, scale=MINIMAP_SCALE)
                     if len(field_pos) > 0:
                         minimap = draw_points_on_pitch(
@@ -383,7 +388,9 @@ def main():
                     ball_center = ball_det.get_anchors_coordinates(sv.Position.CENTER)
                     ball_field = calibrator.project(ball_center, H)
                     ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
-                    ball_trail.append(ball_field[0])
+                    _update_ball_trail(ball_field[0], ball_trail, ball_smooth_state)
+                else:
+                    _update_ball_trail(None, ball_trail, ball_smooth_state)
                 pitch = draw_pitch(CONFIG, scale=MINIMAP_SCALE)
                 if len(field_pos) > 0:
                     for cls_idx, color in enumerate(TEAM_COLORS):
