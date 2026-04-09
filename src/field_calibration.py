@@ -12,7 +12,7 @@ _FIELD_VERTICES = np.array(CONFIG.vertices, dtype=np.float32)
 
 # If a new H moves test points more than this (cm) vs the previous H, reject it.
 # 2000 cm = 20 m — generous enough for real camera movement, but catches garbage Hs.
-MAX_DRIFT_CM = 1000
+MAX_DRIFT_CM = 2000
 
 
 def _homography_drift(H_new: np.ndarray, H_prev: np.ndarray, frame_shape: tuple) -> float:
