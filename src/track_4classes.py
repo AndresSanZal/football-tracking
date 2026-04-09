@@ -123,10 +123,12 @@ def _draw_ball_trail(pitch: np.ndarray, trail: deque, scale: float, padding: int
         thickness = max(1, int(3 * alpha))
         cv2.line(pitch, p1, p2, color, thickness, cv2.LINE_AA)
 
-    # Bright dot at current position
-    cx = int(pts[-1][0] * scale) + padding
-    cy = int(pts[-1][1] * scale) + padding
-    cv2.circle(pitch, (cx, cy), 5, BALL_COLOR, -1, cv2.LINE_AA)
+    # Bright dot at the most recent valid position
+    last_valid = next((p for p in reversed(pts) if p.shape[0] > 0), None)
+    if last_valid is not None:
+        cx = int(last_valid[0] * scale) + padding
+        cy = int(last_valid[1] * scale) + padding
+        cv2.circle(pitch, (cx, cy), 5, BALL_COLOR, -1, cv2.LINE_AA)
     return pitch
 
 
@@ -302,8 +304,11 @@ def main():
                     if len(ball_det) > 0:
                         ball_center = ball_det.get_anchors_coordinates(sv.Position.CENTER)
                         ball_field = calibrator.project(ball_center, H)
-                        ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
-                        _update_ball_trail(ball_field[0], ball_trail, ball_smooth_state)
+                        if len(ball_field) > 0:
+                            ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
+                            _update_ball_trail(ball_field[0], ball_trail, ball_smooth_state)
+                        else:
+                            _update_ball_trail(None, ball_trail, ball_smooth_state)
                     else:
                         _update_ball_trail(None, ball_trail, ball_smooth_state)
                     minimap = draw_pitch(CONFIG, scale=MINIMAP_SCALE)
@@ -387,8 +392,11 @@ def main():
                 if len(ball_det) > 0:
                     ball_center = ball_det.get_anchors_coordinates(sv.Position.CENTER)
                     ball_field = calibrator.project(ball_center, H)
-                    ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
-                    _update_ball_trail(ball_field[0], ball_trail, ball_smooth_state)
+                    if len(ball_field) > 0:
+                        ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
+                        _update_ball_trail(ball_field[0], ball_trail, ball_smooth_state)
+                    else:
+                        _update_ball_trail(None, ball_trail, ball_smooth_state)
                 else:
                     _update_ball_trail(None, ball_trail, ball_smooth_state)
                 pitch = draw_pitch(CONFIG, scale=MINIMAP_SCALE)
