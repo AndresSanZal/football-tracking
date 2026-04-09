@@ -22,7 +22,8 @@ POSITION_ALPHA = 0.07  # EMA weight for new position (lower = smoother dots)
 
 BALL_TRAIL_LEN = 60      # frames to keep in trail (~2 s at 30 fps)
 BALL_COLOR = (255, 255, 255)  # BGR white — dot at current position
-BALL_MAX_JUMP_CM = 3000  # positions farther than this from last valid are treated as no-detection
+BALL_MAX_JUMP_CM = 500   # positions farther than this from last valid are treated as no-detection
+                         # at 30fps: 120km/h ball → ~111cm/frame, 200km/h → ~185cm/frame
 
 calibrator = FieldCalibrator("models/best_pitch.pt")
 
@@ -92,11 +93,15 @@ def _update_ball_trail(
         trail.append(np.empty(0))
         return
 
+    # Reject if projected outside field bounds (bad homography on that frame)
+    if not (0 <= raw_pos[0] <= CONFIG.length and 0 <= raw_pos[1] <= CONFIG.width):
+        trail.append(np.empty(0))
+        return
+
     prev = last_valid_state[0]
     if prev is not None:
         jump = float(np.linalg.norm(raw_pos - prev))
         if jump > BALL_MAX_JUMP_CM:
-            # Outlier — treat as a gap, keep last_valid_state unchanged
             trail.append(np.empty(0))
             return
 
