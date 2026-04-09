@@ -17,8 +17,11 @@ MINIMAP_SCALE = 0.05
 # Tune FIELD_OFFSET (cm) to correct systematic projection bias.
 # Positive x = shift right on minimap, positive y = shift down.
 # Example: if dots appear ~150 cm too far right, set (-150, 0).
-FIELD_OFFSET = (-1000, -500)
+FIELD_OFFSET = (-500, -500)
 POSITION_ALPHA = 0.07  # EMA weight for new position (lower = smoother dots)
+
+BALL_TRAIL_LEN = 60    # frames to keep in trail (~2 s at 30 fps)
+BALL_COLOR = (255, 255, 255)  # BGR white — dot at current position
 
 calibrator = FieldCalibrator("models/best_pitch.pt")
 
@@ -75,6 +78,27 @@ def _smooth_field_positions(
             result[i] = alpha * field_pos[i] + (1 - alpha) * smooth_dict[tid]
         smooth_dict[tid] = result[i]
     return result
+
+
+def _draw_ball_trail(pitch: np.ndarray, trail: deque, scale: float, padding: int = 50) -> np.ndarray:
+    """Draw ball trail on pitch: fading line + bright dot at current position."""
+    pts = list(trail)
+    if len(pts) < 1:
+        return pitch
+
+    for k in range(1, len(pts)):
+        alpha = k / len(pts)  # 0 = oldest (transparent), 1 = newest (bright)
+        p1 = (int(pts[k-1][0] * scale) + padding, int(pts[k-1][1] * scale) + padding)
+        p2 = (int(pts[k][0]   * scale) + padding, int(pts[k][1]   * scale) + padding)
+        color = tuple(int(c * alpha) for c in BALL_COLOR)
+        thickness = max(1, int(3 * alpha))
+        cv2.line(pitch, p1, p2, color, thickness, cv2.LINE_AA)
+
+    # Bright dot at current position
+    cx = int(pts[-1][0] * scale) + padding
+    cy = int(pts[-1][1] * scale) + padding
+    cv2.circle(pitch, (cx, cy), 5, BALL_COLOR, -1, cv2.LINE_AA)
+    return pitch
 
 
 def _print_calibration_diag(raw_field_pos: np.ndarray) -> None:
@@ -171,6 +195,7 @@ def main():
     team_history = defaultdict(lambda: deque(maxlen=TEAM_WINDOW))
     field_pos_smooth: dict = {}  # tracker_id -> smoothed field position (np.ndarray)
     _diag_printed = False  # print field positions once to help calibrate FIELD_OFFSET
+    ball_trail: deque = deque(maxlen=BALL_TRAIL_LEN)  # field positions of the ball
 
     with sv.VideoSink(str(out_path), video_info=video_info) as sink:
         frame_generator = sv.get_video_frames_generator(str(source_path))
@@ -231,23 +256,34 @@ def main():
                     annotated = label_annotator.annotate(scene=annotated, detections=tracked, labels=labels)
                 if len(ball_det) > 0:
                     annotated = triangle_annotator.annotate(scene=annotated, detections=ball_det)
-                if H is not None and len(tracked) > 0:
-                    feet = tracked.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
-                    field_pos = calibrator.project(feet, H)
-                    if not _diag_printed:
-                        _print_calibration_diag(field_pos)
-                        _diag_printed = True
-                    field_pos += np.array(FIELD_OFFSET, dtype=np.float32)
-                    field_pos = _smooth_field_positions(
-                        field_pos, tracked.tracker_id, field_pos_smooth, POSITION_ALPHA
-                    )
+                if H is not None:
+                    if len(tracked) > 0:
+                        feet = tracked.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+                        field_pos = calibrator.project(feet, H)
+                        if not _diag_printed:
+                            _print_calibration_diag(field_pos)
+                            _diag_printed = True
+                        field_pos += np.array(FIELD_OFFSET, dtype=np.float32)
+                        field_pos = _smooth_field_positions(
+                            field_pos, tracked.tracker_id, field_pos_smooth, POSITION_ALPHA
+                        )
+                    else:
+                        field_pos = np.empty((0, 2))
+                    if len(ball_det) > 0:
+                        ball_center = ball_det.get_anchors_coordinates(sv.Position.CENTER)
+                        ball_field = calibrator.project(ball_center, H)
+                        ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
+                        ball_trail.append(ball_field[0])
+                    minimap = draw_pitch(CONFIG, scale=MINIMAP_SCALE)
                     if len(field_pos) > 0:
                         minimap = draw_points_on_pitch(
                             CONFIG, field_pos,
                             face_color=sv.Color.WHITE,
                             scale=MINIMAP_SCALE,
+                            pitch=minimap,
                         )
-                        annotated = _overlay_minimap(annotated, minimap)
+                    minimap = _draw_ball_trail(minimap, ball_trail, MINIMAP_SCALE)
+                    annotated = _overlay_minimap(annotated, minimap)
                 sink.write_frame(annotated)
                 continue
 
@@ -316,8 +352,13 @@ def main():
                 field_pos = _smooth_field_positions(
                     field_pos, tracked_vis.tracker_id, field_pos_smooth, POSITION_ALPHA
                 )
+                if len(ball_det) > 0:
+                    ball_center = ball_det.get_anchors_coordinates(sv.Position.CENTER)
+                    ball_field = calibrator.project(ball_center, H)
+                    ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
+                    ball_trail.append(ball_field[0])
+                pitch = draw_pitch(CONFIG, scale=MINIMAP_SCALE)
                 if len(field_pos) > 0:
-                    pitch = draw_pitch(CONFIG, scale=MINIMAP_SCALE)
                     for cls_idx, color in enumerate(TEAM_COLORS):
                         mask = tracked_vis.class_id == cls_idx
                         if mask.any():
@@ -327,7 +368,8 @@ def main():
                                 scale=MINIMAP_SCALE,
                                 pitch=pitch,
                             )
-                    annotated = _overlay_minimap(annotated, pitch)
+                pitch = _draw_ball_trail(pitch, ball_trail, MINIMAP_SCALE)
+                annotated = _overlay_minimap(annotated, pitch)
 
             sink.write_frame(annotated)
 
