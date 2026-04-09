@@ -3,14 +3,19 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+venv312/
 
 # YOLO / runs
 runs/
 *.pt
+*.joblib
 
 # Data pesada
 data/videos/
 data/datasets/
+
+# sports is a nested git repo — install via requirements.txt in Colab
+sports/
 
 # OS / IDE
 .vscode/

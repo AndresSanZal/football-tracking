@@ -1,0 +1,10 @@
+ultralytics
+supervision
+joblib
+torch
+torchvision
+transformers
+scikit-learn
+numpy
+opencv-python
+git+https://github.com/roboflow/sports.git
