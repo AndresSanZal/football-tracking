@@ -25,7 +25,7 @@ BALL_COLOR = (255, 255, 255)  # BGR white — dot at current position
 BALL_MAX_JUMP_CM = 500   # positions farther than this from last valid are treated as no-detection
                          # at 30fps: 120km/h ball → ~111cm/frame, 200km/h → ~185cm/frame
 POSSESSION_DIST_CM = 200 #distancia máxima en cm para con siderar que un jugador tiene el balón
-POSSESSION_HYSTERESIS = 15 #frames consecutivos necesarios para cambiar de equipo poseedor
+POSSESSION_HYSTERESIS = 1 #frames consecutivos necesarios para cambiar de equipo poseedor
 
 calibrator = FieldCalibrator("models/best_pitch.pt")
 
@@ -488,15 +488,33 @@ def main():
                 pitch = _draw_ball_trail(pitch, ball_trail, MINIMAP_SCALE)
                 annotated = _overlay_minimap(annotated, pitch)
 
-                # Dibujar marcador de posesión (esquina superior izquierda)
+                # Barra de posesión encima del minimap
                 total_frames = possession_frames[0] + possession_frames[1]
                 if total_frames > 0:
                     pct0 = possession_frames[0] / total_frames * 100
                     pct1 = possession_frames[1] / total_frames * 100
-                    text = f"Posesion  T0: {pct0:.1f}%   T1: {pct1:.1f}%"
-                    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-                    cv2.rectangle(annotated, (10, 10), (10 + tw + 10, 10 + th + 10), (0, 0, 0), -1)
-                    cv2.putText(annotated, text, (15, 10 + th), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                    fh, fw = annotated.shape[:2]
+                    # Mismas dimensiones que usará _overlay_minimap al pegar el pitch
+                    bar_w = min(pitch.shape[1], fw - 10)
+                    bar_h = 28
+                    bar_x = 10
+                    mh_actual = min(pitch.shape[0], fh - 10)
+                    bar_y = fh - mh_actual - 10 - bar_h - 4  # 4 px de separación con el minimap
+                    # Fondo gris oscuro
+                    cv2.rectangle(annotated, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (30, 30, 30), -1)
+                    # Relleno equipo 0 (azul) proporcional a su porcentaje
+                    t0_w = int(bar_w * pct0 / 100)
+                    cv2.rectangle(annotated, (bar_x, bar_y), (bar_x + t0_w, bar_y + bar_h), (255, 100, 0), -1)
+                    # Relleno equipo 1 (rojo) ocupa el resto
+                    cv2.rectangle(annotated, (bar_x + t0_w, bar_y), (bar_x + bar_w, bar_y + bar_h), (0, 50, 255), -1)
+                    # Etiqueta T0 a la izquierda
+                    cv2.putText(annotated, f"T0  {pct0:.0f}%", (bar_x + 6, bar_y + 20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+                    # Etiqueta T1 a la derecha (alineada al borde derecho de la barra)
+                    label1 = f"{pct1:.0f}%  T1"
+                    (lw1, _), _ = cv2.getTextSize(label1, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                    cv2.putText(annotated, label1, (bar_x + bar_w - lw1 - 6, bar_y + 20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
             sink.write_frame(annotated)
 
