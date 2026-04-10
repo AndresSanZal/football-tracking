@@ -24,6 +24,8 @@ BALL_TRAIL_LEN = 60      # frames to keep in trail (~2 s at 30 fps)
 BALL_COLOR = (255, 255, 255)  # BGR white — dot at current position
 BALL_MAX_JUMP_CM = 500   # positions farther than this from last valid are treated as no-detection
                          # at 30fps: 120km/h ball → ~111cm/frame, 200km/h → ~185cm/frame
+POSSESSION_DIST_CM = 200 #distancia máxima en cm para con siderar que un jugador tiene el balón
+POSSESSION_HYSTERESIS = 15 #frames consecutivos necesarios para cambiar de equipo poseedor
 
 calibrator = FieldCalibrator("models/best_pitch.pt")
 
@@ -185,6 +187,54 @@ def resolve_goalkeepers_team_id(players: sv.Detections, goalkeepers: sv.Detectio
 
     return np.array(out, dtype=int)
 
+def _update_possession(
+    ball_pos,           # np.ndarray (2,) posición del balón en campo, o None
+    player_field_pos,   # np.ndarray (N, 2) posiciones de jugadores en campo
+    player_teams,       # np.ndarray (N,) equipo de cada jugador (0 o 1)
+    possession_frames,      # [int, int] — se modifica en sitio
+    possession_current,     # [int or None] — se modifica en sitio
+    possession_candidate,   # [int or None, int] — se modifica en sitio
+):
+    """Actualiza estado de la posesión on histéresis"""
+    if ball_pos is None or len(player_field_pos)==0:
+        possession_candidate[0] = None
+        possession_candidate[1] = 0
+        return
+    
+    mask = (player_teams==0) | (player_teams==1)
+    if not mask.any():
+        possession_candidate[0] = None
+        possession_candidate[1]= 0
+        return
+    pos_filtered = player_field_pos[mask]
+    teams_filtered = player_teams[mask]
+
+    #Jugador más cercano al balón
+    dists = np.linalg.norm(pos_filtered - ball_pos, axis=1)
+    closest_idx = int(np.argmin(dists))
+    closest_dist = dists[closest_idx]
+    closest_team = int(teams_filtered[closest_idx])
+
+    # Si está demasiado lejos, nadie tiene posesión clara
+    if closest_dist > POSSESSION_DIST_CM:
+        possession_candidate[0] = None
+        possession_candidate[1] = 0
+        return
+    
+    # Histéresis: acumular frames consecutivos del mismo candidato
+    if possession_candidate[0] == closest_team:
+        possession_candidate[1] += 1
+    else:
+        possession_candidate[0] = closest_team
+        possession_candidate[1] = 1
+
+    # Cambiar posesión oficial solo si llevamos suficientes frames consecutivos
+    if possession_candidate[1] >= POSSESSION_HYSTERESIS:
+        possession_current[0] = closest_team
+
+    # Acumular frames al equipo con posesión oficial
+    if possession_current[0] is not None:
+        possession_frames[possession_current[0]] += 1
 
 def main():
     parser = argparse.ArgumentParser()
@@ -233,6 +283,9 @@ def main():
     _diag_printed = False  # print field positions once to help calibrate FIELD_OFFSET
     ball_trail: deque = deque(maxlen=BALL_TRAIL_LEN)  # field positions of the ball
     ball_smooth_state: list = [None]  # [prev_smoothed_pos or None]
+    possession_frames = [0,0] #Lista -> frames acumulados de posesión por equipo
+    possession_current = [None] #Lista -> equipo que tiene el balón, será 0, 1 o None
+    possession_candidate = [None, 0] #Lista -> [equipo candidato a tener la posesión, frames consecutivos con ventaja]
 
     with sv.VideoSink(str(out_path), video_info=video_info) as sink:
         frame_generator = sv.get_video_frames_generator(str(source_path))
@@ -306,6 +359,8 @@ def main():
                         )
                     else:
                         field_pos = np.empty((0, 2))
+                    # Sin team_classifier no sabemos a qué equipo pertenece cada jugador,
+                    # así que no calculamos posesión en esta rama.
                     if len(ball_det) > 0:
                         ball_center = ball_det.get_anchors_coordinates(sv.Position.CENTER)
                         ball_field = calibrator.project(ball_center, H)
@@ -316,6 +371,7 @@ def main():
                             _update_ball_trail(None, ball_trail, ball_smooth_state)
                     else:
                         _update_ball_trail(None, ball_trail, ball_smooth_state)
+
                     minimap = draw_pitch(CONFIG, scale=MINIMAP_SCALE)
                     if len(field_pos) > 0:
                         minimap = draw_points_on_pitch(
@@ -326,6 +382,7 @@ def main():
                         )
                     minimap = _draw_ball_trail(minimap, ball_trail, MINIMAP_SCALE)
                     annotated = _overlay_minimap(annotated, minimap)
+
                 sink.write_frame(annotated)
                 continue
 
@@ -394,16 +451,29 @@ def main():
                 field_pos = _smooth_field_positions(
                     field_pos, tracked_vis.tracker_id, field_pos_smooth, POSITION_ALPHA
                 )
+                ball_pos_now = None  # posición del balón en campo este frame (o None)
                 if len(ball_det) > 0:
                     ball_center = ball_det.get_anchors_coordinates(sv.Position.CENTER)
                     ball_field = calibrator.project(ball_center, H)
                     if len(ball_field) > 0:
                         ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
-                        _update_ball_trail(ball_field[0], ball_trail, ball_smooth_state)
+                        ball_pos_now = ball_field[0]
+                        _update_ball_trail(ball_pos_now, ball_trail, ball_smooth_state)
                     else:
                         _update_ball_trail(None, ball_trail, ball_smooth_state)
                 else:
                     _update_ball_trail(None, ball_trail, ball_smooth_state)
+
+                # Actualizar posesión: aquí sí sabemos los equipos (tracked_vis.class_id = 0/1/2)
+                _update_possession(
+                    ball_pos_now,
+                    field_pos,
+                    tracked_vis.class_id,
+                    possession_frames,
+                    possession_current,
+                    possession_candidate,
+                )
+
                 pitch = draw_pitch(CONFIG, scale=MINIMAP_SCALE)
                 if len(field_pos) > 0:
                     for cls_idx, color in enumerate(TEAM_COLORS):
@@ -417,6 +487,16 @@ def main():
                             )
                 pitch = _draw_ball_trail(pitch, ball_trail, MINIMAP_SCALE)
                 annotated = _overlay_minimap(annotated, pitch)
+
+                # Dibujar marcador de posesión (esquina superior izquierda)
+                total_frames = possession_frames[0] + possession_frames[1]
+                if total_frames > 0:
+                    pct0 = possession_frames[0] / total_frames * 100
+                    pct1 = possession_frames[1] / total_frames * 100
+                    text = f"Posesion  T0: {pct0:.1f}%   T1: {pct1:.1f}%"
+                    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                    cv2.rectangle(annotated, (10, 10), (10 + tw + 10, 10 + th + 10), (0, 0, 0), -1)
+                    cv2.putText(annotated, text, (15, 10 + th), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
             sink.write_frame(annotated)
 
