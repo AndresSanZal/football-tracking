@@ -20,12 +20,16 @@ MINIMAP_SCALE = 0.05
 FIELD_OFFSET = (-500, -500)
 POSITION_ALPHA = 0.07  # EMA weight for new position (lower = smoother dots)
 
-BALL_TRAIL_LEN = 60      # frames to keep in trail (~2 s at 30 fps)
+BALL_KEYPOINTS_MAX = 60  # máximo de detecciones reales a recordar (no frames — el trail dura mucho más)
+BALL_MAX_GAP_FRAMES = 15 # si entre dos detecciones consecutivas hay más de este nº de frames, no se conectan con línea
 BALL_COLOR = (255, 255, 255)  # BGR white — dot at current position
 BALL_MAX_JUMP_CM = 500   # positions farther than this from last valid are treated as no-detection
                          # at 30fps: 120km/h ball → ~111cm/frame, 200km/h → ~185cm/frame
+BALL_MAX_JUMP_PX = 300   # pixel jump filter: detecciones >300px del último píxel válido = falsa detección
+BALL_POSITION_ALPHA = 0.35  # EMA balón en campo (mayor que jugadores → más reactivo al movimiento real)
+BALL_RESET_AFTER_FRAMES = 30  # si el balón lleva este nº de frames rechazados, se resetea el ancla
 POSSESSION_DIST_CM = 200 #distancia máxima en cm para con siderar que un jugador tiene el balón
-POSSESSION_HYSTERESIS = 1 #frames consecutivos necesarios para cambiar de equipo poseedor
+POSSESSION_HYSTERESIS = 5 #frames consecutivos necesarios para cambiar de equipo poseedor
 
 calibrator = FieldCalibrator("models/best_pitch.pt")
 
@@ -85,58 +89,113 @@ def _smooth_field_positions(
 
 
 def _update_ball_trail(
-    raw_pos: np.ndarray,          # (2,) field position, or None if no detection this frame
-    trail: deque,                 # deque of np.ndarray(2,) or np.ndarray(0,) for gaps
-    last_valid_state: list,       # [last_valid_pos or None] — mutable single-element
-) -> None:
-    """Add ball position to trail, replacing outliers/missing frames with empty arrays (gaps).
-    Gaps prevent _draw_ball_trail from connecting discontinuous detections with long lines."""
+    raw_pos: np.ndarray,          # (2,) field position, or None si no hay detección este frame
+    last_valid_state: list,       # [last_valid_raw_pos or None] — para jump check en cm
+    ema_state: list,              # [smoothed_pos or None] — EMA sobre posiciones aceptadas
+    alpha: float,                 # EMA weight (0=sin actualizar, 1=sin suavizado)
+    rejected_streak: list,        # [int] — frames consecutivos rechazados, para resetear el ancla
+) -> tuple:
+    """Valida la posición del balón y aplica EMA si es aceptada. NO gestiona ningún deque.
+    Si lleva BALL_RESET_AFTER_FRAMES frames rechazados consecutivos, resetea el ancla para
+    que el siguiente frame aceptado no quede bloqueado por una posición antigua.
+    Returns (status_str, smoothed_pos_or_None).
+    Status: 'accepted', 'gap_none', 'gap_bounds', 'gap_jump(Xcm)'."""
     if raw_pos is None:
-        trail.append(np.empty(0))
-        return
+        rejected_streak[0] += 1
+        if rejected_streak[0] >= BALL_RESET_AFTER_FRAMES:
+            last_valid_state[0] = None
+        return "gap_none", None
 
-    # Reject if projected outside field bounds (bad homography on that frame)
+    # Rechazar si la proyección cae fuera del campo (homografía corrupta en este frame)
     if not (0 <= raw_pos[0] <= CONFIG.length and 0 <= raw_pos[1] <= CONFIG.width):
-        trail.append(np.empty(0))
-        return
+        rejected_streak[0] += 1
+        if rejected_streak[0] >= BALL_RESET_AFTER_FRAMES:
+            last_valid_state[0] = None
+        return "gap_bounds", None
 
     prev = last_valid_state[0]
     if prev is not None:
         jump = float(np.linalg.norm(raw_pos - prev))
         if jump > BALL_MAX_JUMP_CM:
-            trail.append(np.empty(0))
-            return
+            rejected_streak[0] += 1
+            if rejected_streak[0] >= BALL_RESET_AFTER_FRAMES:
+                last_valid_state[0] = None
+            return f"gap_jump({jump:.0f}cm)", None
 
+    # Posición aceptada: resetear contador y actualizar estados
+    rejected_streak[0] = 0
     last_valid_state[0] = raw_pos
-    trail.append(raw_pos.copy())
+    if ema_state[0] is None:
+        ema_state[0] = raw_pos.copy()
+    else:
+        ema_state[0] = alpha * raw_pos + (1 - alpha) * ema_state[0]
+    return "accepted", ema_state[0]
 
 
-def _draw_ball_trail(pitch: np.ndarray, trail: deque, scale: float, padding: int = 50) -> np.ndarray:
-    """Draw ball trail on pitch: fading line + bright dot at current position.
-    Empty arrays in the trail act as gaps — no line is drawn across them."""
-    pts = list(trail)
+def _draw_ball_keypoints(
+    pitch: np.ndarray,
+    keypoints: deque,   # deque de tuplas (frame_idx, np.ndarray(2,))
+    scale: float,
+    padding: int = 50,
+) -> np.ndarray:
+    """Dibuja la trayectoria del balón a partir de detecciones reales (sin gaps).
+    - Conecta puntos consecutivos con línea solo si están a <= BALL_MAX_GAP_FRAMES frames de distancia.
+    - El trazo se va desvaneciendo cuanto más antiguo es (fade por índice).
+    - Dot blanco brillante en la posición más reciente."""
+    pts = list(keypoints)  # lista de (frame_idx, pos)
     n = len(pts)
     if n < 1:
         return pitch
 
     for k in range(1, n):
-        # Skip segment if either endpoint is a gap (empty array)
-        if pts[k - 1].shape[0] == 0 or pts[k].shape[0] == 0:
+        fidx_prev, pos_prev = pts[k - 1]
+        fidx_curr, pos_curr = pts[k]
+        # No conectar si el hueco temporal entre detecciones es demasiado grande
+        if fidx_curr - fidx_prev > BALL_MAX_GAP_FRAMES:
             continue
-        alpha = k / n  # 0 = oldest (transparent), 1 = newest (bright)
-        p1 = (int(pts[k-1][0] * scale) + padding, int(pts[k-1][1] * scale) + padding)
-        p2 = (int(pts[k][0]   * scale) + padding, int(pts[k][1]   * scale) + padding)
+        alpha = k / n  # 0 = más antiguo (tenue), 1 = más reciente (brillante)
+        p1 = (int(pos_prev[0] * scale) + padding, int(pos_prev[1] * scale) + padding)
+        p2 = (int(pos_curr[0] * scale) + padding, int(pos_curr[1] * scale) + padding)
         color = tuple(int(c * alpha) for c in BALL_COLOR)
         thickness = max(1, int(3 * alpha))
         cv2.line(pitch, p1, p2, color, thickness, cv2.LINE_AA)
 
-    # Bright dot at the most recent valid position
-    last_valid = next((p for p in reversed(pts) if p.shape[0] > 0), None)
-    if last_valid is not None:
-        cx = int(last_valid[0] * scale) + padding
-        cy = int(last_valid[1] * scale) + padding
-        cv2.circle(pitch, (cx, cy), 5, BALL_COLOR, -1, cv2.LINE_AA)
+    # Dot brillante en la posición más reciente
+    _, last_pos = pts[-1]
+    cx = int(last_pos[0] * scale) + padding
+    cy = int(last_pos[1] * scale) + padding
+    cv2.circle(pitch, (cx, cy), 5, BALL_COLOR, -1, cv2.LINE_AA)
     return pitch
+
+
+def _debug_ball_overlay(
+    frame: np.ndarray,
+    ball_det: sv.Detections,
+    ball_field_adj,     # np.ndarray (2,) posición ajustada en campo, o None
+    trail_status: str,
+    frame_idx: int,
+) -> np.ndarray:
+    """Dibuja info de debug del balón en el frame y lo imprime por consola.
+    Verde = aceptado, rojo = rechazado."""
+    color = (0, 255, 0) if trail_status == "accepted" else (0, 0, 255)
+    if len(ball_det) > 0:
+        conf = float(ball_det.confidence[0])
+        cx, cy = ball_det.get_anchors_coordinates(sv.Position.CENTER)[0]
+        x1, y1, x2, y2 = ball_det.xyxy[0].astype(int)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        field_str = (
+            f"({ball_field_adj[0]:.0f},{ball_field_adj[1]:.0f})"
+            if ball_field_adj is not None else "no_proj"
+        )
+        print(f"[f{frame_idx:05d}] ball conf={conf:.2f} px=({cx:.0f},{cy:.0f})"
+              f" field={field_str} → {trail_status}")
+        cv2.putText(frame, f"ball:{trail_status} c={conf:.2f}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
+    else:
+        print(f"[f{frame_idx:05d}] ball: no_detection → {trail_status}")
+        cv2.putText(frame, "ball:no_det", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (100, 100, 100), 2, cv2.LINE_AA)
+    return frame
 
 
 def _print_calibration_diag(raw_field_pos: np.ndarray) -> None:
@@ -246,6 +305,8 @@ def main():
     parser.add_argument("--iou", type=float, default=0.7)
     parser.add_argument("--max_frames", type=int, default=-1)
     parser.add_argument("--team_model", type=str, default=None)
+    parser.add_argument("--debug_ball", action="store_true",
+                        help="Imprime por consola el estado del balón cada frame y dibuja el bbox en el vídeo")
     args = parser.parse_args()
 
     source_path = Path(args.source)
@@ -281,8 +342,11 @@ def main():
     team_history = defaultdict(lambda: deque(maxlen=TEAM_WINDOW))
     field_pos_smooth: dict = {}  # tracker_id -> smoothed field position (np.ndarray)
     _diag_printed = False  # print field positions once to help calibrate FIELD_OFFSET
-    ball_trail: deque = deque(maxlen=BALL_TRAIL_LEN)  # field positions of the ball
-    ball_smooth_state: list = [None]  # [prev_smoothed_pos or None]
+    ball_keypoints: deque = deque(maxlen=BALL_KEYPOINTS_MAX)  # tuplas (frame_idx, pos) — solo detecciones reales
+    ball_smooth_state: list = [None]     # [last_valid_raw_pos or None] — para jump check en campo
+    ball_ema_state: list = [None]        # [smoothed_field_pos or None] — EMA suavizado
+    last_valid_ball_px: list = [None]    # [last_valid_pixel_center or None] — para filtro en píxeles
+    ball_rejected_streak: list = [0]     # [int] — frames consecutivos rechazados; resetea el ancla si supera BALL_RESET_AFTER_FRAMES
     possession_frames = [0,0] #Lista -> frames acumulados de posesión por equipo
     possession_current = [None] #Lista -> equipo que tiene el balón, será 0, 1 o None
     possession_candidate = [None, 0] #Lista -> [equipo candidato a tener la posesión, frames consecutivos con ventaja]
@@ -361,16 +425,29 @@ def main():
                         field_pos = np.empty((0, 2))
                     # Sin team_classifier no sabemos a qué equipo pertenece cada jugador,
                     # así que no calculamos posesión en esta rama.
+                    ball_field_adj = None
                     if len(ball_det) > 0:
-                        ball_center = ball_det.get_anchors_coordinates(sv.Position.CENTER)
-                        ball_field = calibrator.project(ball_center, H)
-                        if len(ball_field) > 0:
-                            ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
-                            _update_ball_trail(ball_field[0], ball_trail, ball_smooth_state)
+                        ball_px_raw = ball_det.get_anchors_coordinates(sv.Position.CENTER)[0]
+                        px_jump = (float(np.linalg.norm(ball_px_raw - last_valid_ball_px[0]))
+                                   if last_valid_ball_px[0] is not None else 0.0)
+                        if px_jump > BALL_MAX_JUMP_PX:
+                            trail_status = f"px_jump({px_jump:.0f}px)"
                         else:
-                            _update_ball_trail(None, ball_trail, ball_smooth_state)
+                            last_valid_ball_px[0] = ball_px_raw
+                            ball_center = ball_det.get_anchors_coordinates(sv.Position.CENTER)
+                            ball_field = calibrator.project(ball_center, H)
+                            if len(ball_field) > 0:
+                                ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
+                                ball_field_adj = ball_field[0]
+                                trail_status, ball_pos_smooth = _update_ball_trail(ball_field_adj, ball_smooth_state, ball_ema_state, BALL_POSITION_ALPHA, ball_rejected_streak)
+                                if trail_status == "accepted":
+                                    ball_keypoints.append((i, ball_pos_smooth))
+                            else:
+                                trail_status, _ = _update_ball_trail(None, ball_smooth_state, ball_ema_state, BALL_POSITION_ALPHA, ball_rejected_streak)
                     else:
-                        _update_ball_trail(None, ball_trail, ball_smooth_state)
+                        trail_status, _ = _update_ball_trail(None, ball_smooth_state, ball_ema_state, BALL_POSITION_ALPHA, ball_rejected_streak)
+                    if args.debug_ball:
+                        annotated = _debug_ball_overlay(annotated, ball_det, ball_field_adj, trail_status, i)
 
                     minimap = draw_pitch(CONFIG, scale=MINIMAP_SCALE)
                     if len(field_pos) > 0:
@@ -380,7 +457,8 @@ def main():
                             scale=MINIMAP_SCALE,
                             pitch=minimap,
                         )
-                    minimap = _draw_ball_trail(minimap, ball_trail, MINIMAP_SCALE)
+                    if len(ball_keypoints) > 0:
+                        minimap = _draw_ball_keypoints(minimap, ball_keypoints, MINIMAP_SCALE)
                     annotated = _overlay_minimap(annotated, minimap)
 
                 sink.write_frame(annotated)
@@ -397,7 +475,15 @@ def main():
             # 2) Clasificar players a equipos (0/1) + smoothing por track_id
             if len(pl_det) > 0:
                 pl_crops = [sv.crop_image(frame, xyxy) for xyxy in pl_det.xyxy]
-                pred_team = team_classifier.predict(pl_crops)  # 0/1
+                # Algunos crops pueden ser vacíos si el bbox queda fuera del frame
+                valid_mask = np.array([c.size > 0 for c in pl_crops])
+                if not valid_mask.any():
+                    pl_det = pl_det[valid_mask]
+                    pl_crops = []
+                else:
+                    pl_det = pl_det[valid_mask]
+                    pl_crops = [c for c, v in zip(pl_crops, valid_mask) if v]
+                pred_team = team_classifier.predict(pl_crops) if pl_crops else np.array([], dtype=int)  # 0/1
 
                 # actualizar historial por tracker_id
                 for local_idx, team_id in enumerate(pred_team):
@@ -451,18 +537,30 @@ def main():
                 field_pos = _smooth_field_positions(
                     field_pos, tracked_vis.tracker_id, field_pos_smooth, POSITION_ALPHA
                 )
-                ball_pos_now = None  # posición del balón en campo este frame (o None)
+                ball_pos_now = None  # posición suavizada del balón (EMA) para posesión y minimap
+                ball_field_adj = None
                 if len(ball_det) > 0:
-                    ball_center = ball_det.get_anchors_coordinates(sv.Position.CENTER)
-                    ball_field = calibrator.project(ball_center, H)
-                    if len(ball_field) > 0:
-                        ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
-                        ball_pos_now = ball_field[0]
-                        _update_ball_trail(ball_pos_now, ball_trail, ball_smooth_state)
+                    ball_px_raw = ball_det.get_anchors_coordinates(sv.Position.CENTER)[0]
+                    px_jump = (float(np.linalg.norm(ball_px_raw - last_valid_ball_px[0]))
+                               if last_valid_ball_px[0] is not None else 0.0)
+                    if px_jump > BALL_MAX_JUMP_PX:
+                        trail_status = f"px_jump({px_jump:.0f}px)"
                     else:
-                        _update_ball_trail(None, ball_trail, ball_smooth_state)
+                        last_valid_ball_px[0] = ball_px_raw
+                        ball_center = ball_det.get_anchors_coordinates(sv.Position.CENTER)
+                        ball_field = calibrator.project(ball_center, H)
+                        if len(ball_field) > 0:
+                            ball_field += np.array(FIELD_OFFSET, dtype=np.float32)
+                            ball_field_adj = ball_field[0]
+                            trail_status, ball_pos_now = _update_ball_trail(ball_field_adj, ball_smooth_state, ball_ema_state, BALL_POSITION_ALPHA, ball_rejected_streak)
+                            if trail_status == "accepted":
+                                ball_keypoints.append((i, ball_pos_now))
+                        else:
+                            trail_status, _ = _update_ball_trail(None, ball_smooth_state, ball_ema_state, BALL_POSITION_ALPHA, ball_rejected_streak)
                 else:
-                    _update_ball_trail(None, ball_trail, ball_smooth_state)
+                    trail_status, _ = _update_ball_trail(None, ball_smooth_state, ball_ema_state, BALL_POSITION_ALPHA, ball_rejected_streak)
+                if args.debug_ball:
+                    annotated = _debug_ball_overlay(annotated, ball_det, ball_field_adj, trail_status, i)
 
                 # Actualizar posesión: aquí sí sabemos los equipos (tracked_vis.class_id = 0/1/2)
                 _update_possession(
@@ -485,7 +583,8 @@ def main():
                                 scale=MINIMAP_SCALE,
                                 pitch=pitch,
                             )
-                pitch = _draw_ball_trail(pitch, ball_trail, MINIMAP_SCALE)
+                if len(ball_keypoints) > 0:
+                    pitch = _draw_ball_keypoints(pitch, ball_keypoints, MINIMAP_SCALE)
                 annotated = _overlay_minimap(annotated, pitch)
 
                 # Barra de posesión encima del minimap
