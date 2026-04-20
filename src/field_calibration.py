@@ -14,6 +14,10 @@ _FIELD_VERTICES = np.array(CONFIG.vertices, dtype=np.float32)
 # 2000 cm = 20 m — generous enough for real camera movement, but catches garbage Hs.
 MAX_DRIFT_CM = 2000
 
+# Margen en cm alrededor del campo para la validación de bounds.
+# Permite proyecciones ligeramente fuera del campo sin rechazar la H.
+_BOUNDS_MARGIN_CM = 1000
+
 
 def _homography_drift(H_new: np.ndarray, H_prev: np.ndarray, frame_shape: tuple) -> float:
     """Max field-space drift (cm) when projecting mid-frame points through H_new vs H_prev."""
@@ -66,13 +70,45 @@ class FieldCalibrator:
         if H is None or (mask is not None and mask.ravel().sum() < 5):
             return self.H_prev
 
-        # Validate: reject H if it differs too much from the previous one.
-        # This prevents a single bad frame from corrupting H_prev and causing
-        # the "goes crazy then recovers" pattern.
+        # --- Validación 1: coherencia de bounds ---
+        # Las esquinas del frame capturan gradas/cielo (fuera del campo), así que
+        # proyectamos puntos INTERIORES del frame, que casi siempre están sobre el césped.
+        interior_px = np.array([
+            [w * 0.25, h * 0.5], [w * 0.5, h * 0.5], [w * 0.75, h * 0.5],
+            [w * 0.5,  h * 0.3], [w * 0.5, h * 0.7],
+        ], dtype=np.float32).reshape(-1, 1, 2)
+        interior_field = cv2.perspectiveTransform(interior_px, H).reshape(-1, 2)
+        m = _BOUNDS_MARGIN_CM
+        if not (
+            np.all(interior_field[:, 0] > -m) and
+            np.all(interior_field[:, 0] < CONFIG.length + m) and
+            np.all(interior_field[:, 1] > -m) and
+            np.all(interior_field[:, 1] < CONFIG.width + m)
+        ):
+            return self.H_prev  # H produce proyecciones fuera del campo → descartar
+
+        # --- Validación 2: consistencia de orientación respecto a H_prev ---
+        # No asumimos qué lado es "izquierda" en absoluto (depende de la cámara).
+        # Solo verificamos que la nueva H NO invierta la orientación respecto a la anterior.
+        # Si H_prev es None (primer frame válido) aceptamos cualquier orientación.
+        if self.H_prev is not None:
+            side_pts = np.array(
+                [[w * 0.1, h * 0.5], [w * 0.9, h * 0.5]], dtype=np.float32
+            ).reshape(-1, 1, 2)
+            side_new  = cv2.perspectiveTransform(side_pts, H).reshape(-1, 2)
+            side_prev = cv2.perspectiveTransform(side_pts, self.H_prev).reshape(-1, 2)
+            new_is_normal  = side_new[0, 0]  < side_new[1, 0]
+            prev_is_normal = side_prev[0, 0] < side_prev[1, 0]
+            if new_is_normal != prev_is_normal:
+                return self.H_prev  # H nueva está espejada respecto a la anterior → descartar
+
+        # --- Validación 3: drift respecto a la H anterior ---
+        # Evita que un frame con H ligeramente incorrecta pero coherente en orientación
+        # desplace bruscamente todos los jugadores.
         if self.H_prev is not None:
             drift = _homography_drift(H, self.H_prev, frame.shape)
             if drift > self.max_drift:
-                return self.H_prev  # silently discard garbage H
+                return self.H_prev  # drift excesivo → descartar
 
         self.H_prev = H
         return H
