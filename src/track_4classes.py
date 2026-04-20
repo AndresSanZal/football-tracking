@@ -29,7 +29,7 @@ BALL_MAX_JUMP_PX = 300   # pixel jump filter: detecciones >300px del último pí
 BALL_POSITION_ALPHA = 0.35  # EMA balón en campo (mayor que jugadores → más reactivo al movimiento real)
 BALL_RESET_AFTER_FRAMES = 30  # si el balón lleva este nº de frames rechazados, se resetea el ancla
 POSSESSION_DIST_CM = 200 #distancia máxima en cm para con siderar que un jugador tiene el balón
-POSSESSION_HYSTERESIS = 5 #frames consecutivos necesarios para cambiar de equipo poseedor
+POSSESSION_HYSTERESIS = 10 #frames consecutivos necesarios para cambiar de equipo poseedor
 
 calibrator = FieldCalibrator("models/best_pitch.pt")
 
@@ -250,36 +250,59 @@ def _update_possession(
     ball_pos,           # np.ndarray (2,) posición del balón en campo, o None
     player_field_pos,   # np.ndarray (N, 2) posiciones de jugadores en campo
     player_teams,       # np.ndarray (N,) equipo de cada jugador (0 o 1)
-    possession_frames,      # [int, int] — se modifica en sitio
     possession_current,     # [int or None] — se modifica en sitio
     possession_candidate,   # [int or None, int] — se modifica en sitio
+    frame_idx: int = 0,
+    debug: bool = False,
 ):
-    """Actualiza estado de la posesión on histéresis"""
-    if ball_pos is None or len(player_field_pos)==0:
-        possession_candidate[0] = None
-        possession_candidate[1] = 0
+    """Actualiza SOLO quién tiene la posesión oficial (possession_current).
+    La acumulación de possession_frames ocurre en main() cada frame,
+    de forma que el contador del poseedor sigue corriendo durante pases
+    (balón en el aire) hasta que el equipo contrario consigue su propio streak.
+
+    Cuando ball_pos es None: congelar candidato, no modificar possession_current.
+    Cuando closest_dist > POSSESSION_DIST_CM: resetear candidato (balón suelto),
+      pero possession_current NO cambia — el equipo sigue "teniendo" el balón.
+    """
+    # Sin balón este frame: congelar estado, no acumular
+    if ball_pos is None:
+        if debug:
+            print(f"[poss f{frame_idx:05d}] ball=None → estado congelado"
+                  f" | candidato=T{possession_candidate[0]} streak={possession_candidate[1]}"
+                  f" | oficial=T{possession_current[0]}")
         return
-    
-    mask = (player_teams==0) | (player_teams==1)
+
+    # Sin jugadores este frame: igual, congelar
+    if len(player_field_pos) == 0:
+        if debug:
+            print(f"[poss f{frame_idx:05d}] sin jugadores → estado congelado")
+        return
+
+    mask = (player_teams == 0) | (player_teams == 1)
     if not mask.any():
-        possession_candidate[0] = None
-        possession_candidate[1]= 0
+        if debug:
+            print(f"[poss f{frame_idx:05d}] solo árbitros → estado congelado")
         return
-    pos_filtered = player_field_pos[mask]
+
+    pos_filtered   = player_field_pos[mask]
     teams_filtered = player_teams[mask]
 
-    #Jugador más cercano al balón
-    dists = np.linalg.norm(pos_filtered - ball_pos, axis=1)
-    closest_idx = int(np.argmin(dists))
+    # Jugador más cercano al balón
+    dists        = np.linalg.norm(pos_filtered - ball_pos, axis=1)
+    closest_idx  = int(np.argmin(dists))
     closest_dist = dists[closest_idx]
     closest_team = int(teams_filtered[closest_idx])
 
-    # Si está demasiado lejos, nadie tiene posesión clara
+    # Si está demasiado lejos, el balón está suelto → resetear candidato
     if closest_dist > POSSESSION_DIST_CM:
         possession_candidate[0] = None
         possession_candidate[1] = 0
+        if debug:
+            print(f"[poss f{frame_idx:05d}] ball=detected  más cercano=T{closest_team}"
+                  f" dist={closest_dist:.0f}cm > {POSSESSION_DIST_CM}cm → suelto"
+                  f" | oficial=T{possession_current[0]}")
         return
-    
+
     # Histéresis: acumular frames consecutivos del mismo candidato
     if possession_candidate[0] == closest_team:
         possession_candidate[1] += 1
@@ -291,9 +314,11 @@ def _update_possession(
     if possession_candidate[1] >= POSSESSION_HYSTERESIS:
         possession_current[0] = closest_team
 
-    # Acumular frames al equipo con posesión oficial
-    if possession_current[0] is not None:
-        possession_frames[possession_current[0]] += 1
+    if debug:
+        confirmed = " ✓ CONFIRMADO" if possession_candidate[1] >= POSSESSION_HYSTERESIS else ""
+        print(f"[poss f{frame_idx:05d}] ball=detected  más cercano=T{closest_team}"
+              f" dist={closest_dist:.0f}cm  streak={possession_candidate[1]}/{POSSESSION_HYSTERESIS}"
+              f"{confirmed} | oficial=T{possession_current[0]}")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -307,6 +332,8 @@ def main():
     parser.add_argument("--team_model", type=str, default=None)
     parser.add_argument("--debug_ball", action="store_true",
                         help="Imprime por consola el estado del balón cada frame y dibuja el bbox en el vídeo")
+    parser.add_argument("--debug_possession", action="store_true",
+                        help="Imprime por consola el estado de la posesión cada frame")
     args = parser.parse_args()
 
     source_path = Path(args.source)
@@ -562,15 +589,21 @@ def main():
                 if args.debug_ball:
                     annotated = _debug_ball_overlay(annotated, ball_det, ball_field_adj, trail_status, i)
 
-                # Actualizar posesión: aquí sí sabemos los equipos (tracked_vis.class_id = 0/1/2)
+                # Actualizar quién tiene la posesión oficial
                 _update_possession(
                     ball_pos_now,
                     field_pos,
                     tracked_vis.class_id,
-                    possession_frames,
                     possession_current,
                     possession_candidate,
+                    frame_idx=i,
+                    debug=args.debug_possession,
                 )
+                # Acumular frames cada frame, independientemente de si el balón se detecta.
+                # El poseedor sigue acumulando durante pases hasta que el equipo contrario
+                # consiga su propio streak de POSSESSION_HYSTERESIS frames consecutivos.
+                if possession_current[0] is not None:
+                    possession_frames[possession_current[0]] += 1
 
                 pitch = draw_pitch(CONFIG, scale=MINIMAP_SCALE)
                 if len(field_pos) > 0:
