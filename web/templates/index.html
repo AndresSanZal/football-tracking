@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Football Tracker — Inicio{% endblock %}
+
+{% block content %}
+<section class="upload-section">
+  <h1>Analiza un partido</h1>
+  <p>Sube un vídeo de fútbol y el sistema detectará jugadores, calculará métricas y generará un vídeo anotado.</p>
+
+  <form action="/upload" method="post" enctype="multipart/form-data" class="upload-form">
+    <label for="video" class="file-label">
+      <span id="file-name">Selecciona un vídeo (.mp4)</span>
+      <input type="file" id="video" name="video" accept="video/mp4,video/*" required
+             onchange="document.getElementById('file-name').textContent = this.files[0]?.name || 'Selecciona un vídeo'" />
+    </label>
+    <button type="submit" class="btn-primary">Analizar vídeo</button>
+  </form>
+</section>
+
+{% if matches %}
+<section class="matches-section">
+  <h2>Partidos procesados</h2>
+  <table class="matches-table">
+    <thead>
+      <tr>
+        <th>Nombre</th>
+        <th>Fecha</th>
+        <th>Estado</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for m in matches %}
+      <tr>
+        <td>{{ m.name }}</td>
+        <td>{{ m.uploaded_at }}</td>
+        <td>
+          <span class="badge badge-{{ m.status }}">
+            {% if m.status == 'pending' %}Pendiente
+            {% elif m.status == 'processing' %}Procesando...
+            {% elif m.status == 'done' %}Completado
+            {% else %}Error{% endif %}
+          </span>
+        </td>
+        <td>
+          {% if m.status == 'done' %}
+            <a href="/match/{{ m.id }}" class="btn-sm">Ver métricas</a>
+          {% elif m.status == 'processing' or m.status == 'pending' %}
+            <a href="/match/{{ m.id }}/processing" class="btn-sm btn-secondary">Ver progreso</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endblock %}

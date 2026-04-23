@@ -5,6 +5,7 @@ torch
 torchvision
 transformers
 scikit-learn
+scipy
 numpy
 opencv-python
 git+https://github.com/roboflow/sports.git

@@ -2,7 +2,7 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 
-field_model = YOLO("models/best2_pitch.pt")
+field_model = YOLO("models/best_pitch.pt")
 
 def draw_pitch_keypoints(frame_to_draw, original_frame, field_model, conf_threshold=0.5):
     result = field_model(original_frame, verbose=False)[0]

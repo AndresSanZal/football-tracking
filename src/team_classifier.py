@@ -71,3 +71,23 @@ class TeamClassifier:
 
         team_ids = self.kmeans.predict(features)
         return team_ids.astype(int)
+
+    def predict_with_embeddings(
+        self, crops_bgr: List[np.ndarray]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Devuelve (team_ids, embeddings).
+        embeddings: (N, 768) float32 — vectores SiGLIP crudos, útiles para ReID.
+        team_ids:   (N,)     int    — mismos que predict().
+        """
+        if len(crops_bgr) == 0:
+            return np.array([], dtype=int), np.zeros((0, 768), dtype=np.float32)
+
+        embeddings = self._extract_embeddings(crops_bgr)  # (N, 768)
+
+        if self.reducer is not None:
+            features = self.reducer.transform(embeddings)
+        else:
+            features = embeddings
+
+        team_ids = self.kmeans.predict(features).astype(int)
+        return team_ids, embeddings

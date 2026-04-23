@@ -11,6 +11,8 @@ import supervision as sv
 sys.path.insert(0, str(Path(__file__).parent.parent / "sports"))
 from team_classifier import TeamClassifier
 from field_calibration import FieldCalibrator, CONFIG
+from reid_reconnector import ReIDReconnector
+from metrics_exporter import MetricsExporter
 from sports.annotators.soccer import draw_pitch, draw_points_on_pitch
 
 MINIMAP_SCALE = 0.05
@@ -334,6 +336,8 @@ def main():
                         help="Imprime por consola el estado del balón cada frame y dibuja el bbox en el vídeo")
     parser.add_argument("--debug_possession", action="store_true",
                         help="Imprime por consola el estado de la posesión cada frame")
+    parser.add_argument("--metrics_output", type=str, default=None,
+                        help="Ruta del JSON de métricas a exportar al finalizar (ej: runs/metrics.json)")
     args = parser.parse_args()
 
     source_path = Path(args.source)
@@ -359,10 +363,20 @@ def main():
     tracker = sv.ByteTrack(
         track_activation_threshold=0.30,
         lost_track_buffer=90,              # el video esta a 30 fps asi que le damos 3 segundos para encontrar id de nuevo
-        minimum_matching_threshold=0.70,
+        minimum_matching_threshold=0.60,
         frame_rate=video_info.fps
     )
     tracker.reset()
+
+    # ReID reconnector (persistencia de IDs)
+    reconnector = ReIDReconnector()
+
+    # Métricas (exportación JSON al final)
+    metrics_out_path = args.metrics_output
+    if metrics_out_path is None:
+        stem = Path(args.source).stem
+        metrics_out_path = str(Path(args.output).parent / f"metrics_{stem}.json")
+    exporter = MetricsExporter(video_path=args.source, fps=video_info.fps)
 
     # Team smoothing (por track_id)
     TEAM_WINDOW = 15  # 15–30
@@ -500,6 +514,8 @@ def main():
             ref_det = tracked[tracked.class_id == REFEREE_ID]
 
             # 2) Clasificar players a equipos (0/1) + smoothing por track_id
+            #    Guardamos los embeddings SiGLIP para el ReID reconnector
+            reid_embeddings: dict = {}   # {tracker_id: np.ndarray(768,)}
             if len(pl_det) > 0:
                 pl_crops = [sv.crop_image(frame, xyxy) for xyxy in pl_det.xyxy]
                 # Algunos crops pueden ser vacíos si el bbox queda fuera del frame
@@ -510,7 +526,15 @@ def main():
                 else:
                     pl_det = pl_det[valid_mask]
                     pl_crops = [c for c, v in zip(pl_crops, valid_mask) if v]
-                pred_team = team_classifier.predict(pl_crops) if pl_crops else np.array([], dtype=int)  # 0/1
+
+                if pl_crops:
+                    pred_team, emb_matrix = team_classifier.predict_with_embeddings(pl_crops)
+                    # Guardar embedding por tracker_id
+                    for local_idx in range(len(pl_det)):
+                        tid = int(pl_det.tracker_id[local_idx])
+                        reid_embeddings[tid] = emb_matrix[local_idx]
+                else:
+                    pred_team = np.array([], dtype=int)
 
                 # actualizar historial por tracker_id
                 for local_idx, team_id in enumerate(pred_team):
@@ -539,6 +563,51 @@ def main():
             # 5) Unir de nuevo (ya en "clases de visualización")
             tracked_vis = sv.Detections.merge([pl_det, gk_det, ref_det])
             tracked_vis.class_id = tracked_vis.class_id.astype(int)
+
+            # 6) ReID reconnector: reasignar IDs canónicos
+            if tracked_vis.tracker_id is not None and len(tracked_vis.tracker_id) > 0:
+                # Construir dicts para el reconnector
+                reid_teams: dict = {
+                    int(tid): int(cid)
+                    for tid, cid in zip(tracked_vis.tracker_id, tracked_vis.class_id)
+                }
+                # field_pos_smooth aún no está actualizado para este frame,
+                # pero usamos el valor del frame anterior (suficiente para gating)
+                reid_fpos: dict = {
+                    int(tid): field_pos_smooth[int(tid)]
+                    for tid in tracked_vis.tracker_id
+                    if int(tid) in field_pos_smooth
+                }
+                # Posición en píxeles (pies) para TTL diferenciado por borde
+                reid_pxpos: dict = {
+                    int(tid): coords
+                    for tid, coords in zip(
+                        tracked_vis.tracker_id,
+                        tracked_vis.get_anchors_coordinates(sv.Position.BOTTOM_CENTER),
+                    )
+                }
+                fh, fw = frame.shape[:2]
+                id_map = reconnector.update(
+                    frame_idx=i,
+                    track_ids=tracked_vis.tracker_id,
+                    embeddings=reid_embeddings,
+                    teams=reid_teams,
+                    field_pos=reid_fpos,
+                    pixel_pos=reid_pxpos,
+                    frame_wh=(fw, fh),
+                )
+                if id_map:
+                    tracked_vis.tracker_id = np.array(
+                        [id_map.get(int(t), int(t)) for t in tracked_vis.tracker_id],
+                        dtype=tracked_vis.tracker_id.dtype,
+                    )
+
+                # Asignar IDs fijos 1-20 (T0: 1-10, T1: 11-20)
+                tracked_vis.tracker_id = np.array(
+                    [reconnector.get_fixed_id(int(t), int(c))
+                     for t, c in zip(tracked_vis.tracker_id, tracked_vis.class_id)],
+                    dtype=tracked_vis.tracker_id.dtype,
+                )
 
             # Etiquetas
             cls_map = {TEAM0_CLASS: "T0", TEAM1_CLASS: "T1", REF_CLASS: "REF"}
@@ -604,6 +673,15 @@ def main():
                 # consiga su propio streak de POSSESSION_HYSTERESIS frames consecutivos.
                 if possession_current[0] is not None:
                     possession_frames[possession_current[0]] += 1
+                
+                # Registrar métricas de este frame
+                exporter.record_frame(
+                    frame_idx=i,
+                    track_ids=tracked_vis.tracker_id,
+                    teams=tracked_vis.class_id,
+                    field_pos=field_pos if len(field_pos) > 0 else None,
+                    ball_pos=ball_pos_now,
+                )
 
                 pitch = draw_pitch(CONFIG, scale=MINIMAP_SCALE)
                 if len(field_pos) > 0:
@@ -652,6 +730,8 @@ def main():
 
 
     print(f"Vídeo guardado en {out_path}")
+    reconnector.print_stats()
+    exporter.export(possession_frames=possession_frames, out_path=metrics_out_path)
 
 
 if __name__ == "__main__":

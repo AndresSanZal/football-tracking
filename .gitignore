@@ -17,6 +17,16 @@ data/datasets/
 # sports is a nested git repo — install via requirements.txt in Colab
 sports/
 
+# Web app — datos generados en runtime
+web/uploads/
+web/runs/
+web/*.db
+
+# Archivos temporales / sesión
+session_summary.txt
+explicacion_sistema.txt
+src/TEST_FIELD.PY
+
 # OS / IDE
 .vscode/
 .DS_Store

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Procesando — {{ match.name }}{% endblock %}
+
+{% block content %}
+<section class="processing-section">
+  <h1>Analizando vídeo</h1>
+  <p class="match-name">{{ match.name }}</p>
+
+  <div class="spinner"></div>
+  <p id="status-msg">El tracking está en marcha. Esto puede tardar varios minutos dependiendo de la duración del vídeo.</p>
+
+  {% if match.status == 'error' %}
+  <div class="error-box">
+    <strong>Error durante el procesado:</strong>
+    <pre>{{ match.error_msg }}</pre>
+  </div>
+  {% endif %}
+</section>
+
+<script>
+  // Polling cada 5 segundos al endpoint de estado
+  const matchId = {{ match.id }};
+
+  async function checkStatus() {
+    const res  = await fetch(`/match/${matchId}/status`);
+    const data = await res.json();
+
+    if (data.status === 'done') {
+      window.location.href = `/match/${matchId}`;
+    } else if (data.status === 'error') {
+      document.getElementById('status-msg').textContent = 'Error durante el procesado: ' + (data.error_msg || '');
+      clearInterval(interval);
+    }
+  }
+
+  const interval = setInterval(checkStatus, 5000);
+</script>
+{% endblock %}

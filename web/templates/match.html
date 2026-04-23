@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}{{ match.name }} — Métricas{% endblock %}
+
+{% block content %}
+<section class="match-header">
+  <h1>{{ match.name }}</h1>
+  <p class="meta">{{ match.total_frames }} frames · {{ match.fps | round(1) }} fps</p>
+  <a href="/" class="btn-sm btn-secondary">← Volver</a>
+</section>
+
+<!-- Posesión -->
+{% if possession %}
+<section class="card">
+  <h2>Posesión</h2>
+  <div class="possession-labels">
+    <span class="poss-label-t0">T0 &nbsp; {{ possession.team0_pct }}%</span>
+    <span class="poss-label-t1">{{ possession.team1_pct }}% &nbsp; T1</span>
+  </div>
+  <div class="possession-bar">
+    <div class="possession-t0" style="width: {{ possession.team0_pct }}%"></div>
+    <div class="possession-t1" style="width: {{ possession.team1_pct }}%"></div>
+  </div>
+</section>
+{% endif %}
+
+<!-- Tabla de jugadores -->
+<section class="card">
+  <h2>Jugadores</h2>
+  <table class="players-table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Equipo</th>
+        <th>Distancia (m)</th>
+        <th>Vel. media (km/h)</th>
+        <th>Vel. máx. (km/h)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in players %}
+      <tr class="team-{{ p.team }}">
+        <td>#{{ p.fixed_id }}</td>
+        <td>{{ "T0" if p.team == 0 else "T1" if p.team == 1 else "REF" }}</td>
+        <td>{{ "%.1f" | format(p.distance_m or 0) }}</td>
+        <td>{{ "%.1f" | format(p.avg_speed_kmh or 0) }}</td>
+        <td>{{ "%.1f" | format(p.max_speed_kmh or 0) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<!-- Mapa de trayectorias -->
+<section class="card">
+  <h2>Trayectorias en el campo</h2>
+  <div class="pitch-container">
+    <canvas id="pitchCanvas"></canvas>
+  </div>
+</section>
+
+<!-- Vídeo anotado -->
+<section class="card">
+  <h2>Vídeo anotado</h2>
+  <video controls class="match-video">
+    <source src="/match/{{ match.id }}/video" type="video/mp4" />
+    Tu navegador no soporta el elemento de vídeo.
+  </video>
+</section>
+
+<script>
+const MATCH_ID   = {{ match.id }};
+const FIELD_W_CM = 12000;
+const FIELD_H_CM = 7000;
+
+// Colores por equipo
+const TEAM_COLORS = { 0: "#4a90e2", 1: "#e25f4a", ball: "#ffffff" };
+
+async function drawTrajectories() {
+  const res  = await fetch(`/api/match/${MATCH_ID}/trajectories`);
+  const data = await res.json();
+
+  const canvas = document.getElementById("pitchCanvas");
+  const ctx    = canvas.getContext("2d");
+
+  // Ajustar canvas al contenedor manteniendo proporción del campo
+  const container = canvas.parentElement;
+  const cw = container.clientWidth;
+  const ch = Math.round(cw * FIELD_H_CM / FIELD_W_CM);
+  canvas.width  = cw;
+  canvas.height = ch;
+
+  const scaleX = cw / FIELD_W_CM;
+  const scaleY = ch / FIELD_H_CM;
+
+  // Fondo verde campo
+  ctx.fillStyle = "#2d5a1b";
+  ctx.fillRect(0, 0, cw, ch);
+
+  // Líneas del campo (simplificadas)
+  ctx.strokeStyle = "rgba(255,255,255,0.5)";
+  ctx.lineWidth   = 1;
+  // Borde
+  ctx.strokeRect(scaleX * 500, scaleY * 500, cw - scaleX * 1000, ch - scaleY * 1000);
+  // Línea central
+  ctx.beginPath();
+  ctx.moveTo(cw / 2, scaleY * 500);
+  ctx.lineTo(cw / 2, ch - scaleY * 500);
+  ctx.stroke();
+  // Círculo central
+  ctx.beginPath();
+  ctx.arc(cw / 2, ch / 2, scaleX * 915, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Dibujar trayectorias
+  for (const [pid, info] of Object.entries(data)) {
+    const points = info.points;
+    if (!points || points.length < 2) continue;
+
+    const color = pid === "ball"
+      ? TEAM_COLORS.ball
+      : (TEAM_COLORS[info.team] || "#aaa");
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth   = pid === "ball" ? 1.5 : 1;
+    ctx.globalAlpha = pid === "ball" ? 0.6 : 0.4;
+
+    ctx.beginPath();
+    ctx.moveTo(points[0][0] * scaleX, points[0][1] * scaleY);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i][0] * scaleX, points[i][1] * scaleY);
+    }
+    ctx.stroke();
+
+    // Punto final
+    ctx.globalAlpha = 1.0;
+    ctx.fillStyle   = color;
+    const last = points[points.length - 1];
+    ctx.beginPath();
+    ctx.arc(last[0] * scaleX, last[1] * scaleY, pid === "ball" ? 3 : 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+drawTrajectories();
+</script>
+{% endblock %}
